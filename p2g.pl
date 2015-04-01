@@ -4,6 +4,7 @@ use CGI qw/:standard/;
 use File::Copy;
 my $tmp_dir = '/home/sunshine/KuaiPan/GraduatePaper/tmp';
 my $BlastHead ="P2G: Powered by TBLASTN 2.2.30+\r\n\r\n\r\nResult lines begin:\r\n\r\n\r\n";
+my $GBrowse_URL = "http://www.heqiang.com/cgi-bin/gb2/gbrowse/hg19/";
 
 
 #########################
@@ -22,6 +23,20 @@ my $BlastHead ="P2G: Powered by TBLASTN 2.2.30+\r\n\r\n\r\nResult lines begin:\r
 # Subroutines start
 #########################
 
+
+##################################################################################
+# Subroutine  : make_query_page
+# Description : P2G's default page, the query page. Using CGI module to display 
+# 				a textarea for the input of query sequence, it also accepts a 
+#				fasta format file; there are also other options you can set to 
+#				custom the TBLASTN's parameters, such as expect value, max
+#				results number.
+# Params      : void
+# Return 	  : void
+# Created 	  : ????
+# Modified 	  : 2015-3-31 by Qiang He
+#################################################################################
+
 sub make_query_page{
 
 	####----advanced search parameter
@@ -30,7 +45,7 @@ sub make_query_page{
 		'title'=>'Expected number of chance matches in a random model. By default 10.'
 		});
 	my $max_results = textfield({'name'=>'max_length','size'=>7,'maxlength'=>3, 'value'=>10,
-		'title'=>'Maximum number of aligned sequences to display. By default 300.' 		
+		'title'=>'Maximum number of aligned sequences to display. By default 10.' 		
 		});
 	my $tblastn_short = checkbox_group({'name'=>'short_default', 
 		'values'=>'Optimized parameters for short peptide (<15 residues)',
@@ -50,7 +65,7 @@ sub make_query_page{
 		'title'=>'Click the button to load the example data!',
 		onclick=>"ExampleMimoBlast();"});
 	my $submit_button = submit({'id'=>'submit_button','name'=>'submit','value'=>'BLAST',
-		'title'=>'Click the button will start the blast!'
+		'title'=>'Click the button to start!'
 		});
 	my $reset_button = reset({'name'=>'reset','value'=>'Reset',
 		'title'=>'Click the button will clear all your inputs!'
@@ -59,7 +74,7 @@ sub make_query_page{
 	####----query table
 	my $MainPanel= table(
             Tr([
-                th(['Enter a set of peptide sequences in the text area below:']),
+                th(['Enter a peptide sequence in the text area below:']),
                 td([$user_seq]),
                 td(['<b>Or upload a sequence file: </b>'.$user_upload]),
                 td(['&nbsp;']),
@@ -71,8 +86,8 @@ sub make_query_page{
             ]),
 		);
 		
-	my $query = div({'id'=>'content'},p({'class'=>'p3'},'The MimoBlast tool in the SAROTUP suite is designed to check if there are peptides in the MimoDB database that are identical or <b>similar</b> to the peptides user submitted. Highly similar peptides obtained with various targets might also be TUPs. Besides, peptides similar to a known TUP may also be TUPs. For example, SVSVGMNPSPRP is very likely to be a TUP because it is nearly identical to SVSVGMKPSPRP, a notorious TUP. If you got the former peptide, a BLAST against the MimoDB database would remind you it may be a TUP. Here we go!'), div({'id'=>'nb'}, $MainPanel));
-		
+	my $query = div({'id'=>'content'},p({'class'=>'p3'},'P2G is a web service that accepts <b>peptide</b> as input, and it locates the peptide in <b>Genome</b>. It uses <b>TBLASTN</b> to search the Human Genome database and then uses <b>GBrowse</b> to display the results visually. Here we go!'), div({'id'=>'nb'}, $MainPanel));
+
 	####-----query page
 
 	my $start_form = start_multipart_form;
@@ -84,9 +99,24 @@ sub make_query_page{
 	make_basic_page($query_content);
 }
 
+###############################################################################
+# Subroutines : make_result_page
+# Description : Display the result of TBLASTN: if there is no hit at all,
+#               display no hits found; if there is only one hit found, 
+#               navigate to the GBrowse page using the hit's properties
+#				(sequence name, start position, end position); if there are 
+#				more than one hit, make a table display the hits, including 
+#				the sequence name, start positon, end position and frame.
+# Params 	  : void
+# Return 	  : void
+# Created 	  : ????
+# Modified    : 2015-3-31 by Qiang He
+###############################################################################
+
 sub make_result_page{
 	my $result_table;
 	
+	## present tblastn's report 
 	my ($report) = url_param('File');
 	if ($report) {
 		my $what;
@@ -103,27 +133,59 @@ sub make_result_page{
 		my $load_file = upload('upload_file');
 
 		####----check user input, get unique seqs
-		my $seqs = check_user_input($seq,$load_file);
+		my $seqs = check_user_input($seq, $load_file);
 	
-		####----save_mimotopes to local PC
-		my ($mimotop_tmp,$run_time)= save_mimotopes(@$seqs);
+		####----save_mimotopes to server's tmp dir
+		my ($mimotop_tmp, $run_time) = save_mimotopes(@$seqs);
 	
 		####----run tblastn to get the result
-		my ($result_file_name) = run_tblastn($mimotop_tmp,$run_time);
+		my ($result_file_name) = run_tblastn($mimotop_tmp, $run_time);
 	
 		####----parse the result file to get information
-		my $final_result = parse_result($result_file_name,$seqs,$run_time);
+		my $result = parse_result($result_file_name, $seqs, $run_time);
+		my @row_result = @$result;
 
 		####----create the result table
-		my $downfile = substr($result_file_name, 34);
-		my $downlink = a({'-href'=>"../temp/$downfile.gz",'Title'=>'Download full blast result file','target'=>'_blank'},img({'src'=>'../image/download.gif','align'=>'absmiddle','hspace'=>'8'}));
-		my $thead = th(['Your Query Peptide','Similar Peptide in MimoDB','Blast Report'.$downlink]);
+		# hash table key
+		my $hit_name = "name";
+		my $hit_start = "start";
+		my $hit_end = "end";
+		my $hit_frame = "frame";
+		my $hit_query = "query";
+		# Table header
+		my $thead = th(['Matched Chromosome','Your Query Peptide', 'Frame', 'Start Postion', 'End Postion']);
 
-		$result_table = div({'id'=>'content'},p({'class'=>'p3'},'The MimoBlast results are summarized in the table below. Move your mouse over the hyperlinked peptide sequences one by one, you can view aligment in pairs on the fly through the pop-up browser windows. You can also read the report file for each query sequence or download all the report in a compressed archive by click the corresponding links or icons.'), table(Tr($thead), @$final_result));
+		my (@name, @query_seq, @frame, @start, @end);
+		my @final_result = ();
+
+		# Create table for each hit
+		my $i;
+		for($i=1; $i<$row_result[0]+1; $i++) {
+			push @name, $row_result[$i]{$hit_name};
+			push @query_seq, $row_result[$i]{$hit_query};
+			push @frame, $row_result[$i]{$hit_frame};
+			push @start, $row_result[$i]{$hit_start};
+			push @end, $row_result[$i]{$hit_end};
+			#my $row_result = Tr([td([$row_result[$i]{$hit_name}, $row_result[$i]{$hit_query}, $row_result[$i]{$hit_frame}, $row_result[$i]{$hit_start}, $row_result[$i]{$hit_end}])]);
+			my $row_result = Tr([td([a({'href'=> $GBrowse_URL."?q=$row_result[$i]{$hit_name}:$row_result[$i]{$hit_start}..$row_result[$i]{$hit_end}"},$row_result[$i]{$hit_name}), $row_result[$i]{$hit_query}, $row_result[$i]{$hit_frame}, $row_result[$i]{$hit_start}, $row_result[$i]{$hit_end}])]);
+			push @final_result, $row_result;
+		}
+
+		$result_table = div({'id'=>'content'},p({'class'=>'p3'},'The MimoBlast results are summarized in the table below. Move your mouse over the hyperlinked peptide sequences one by one, you can view aligment in pairs on the fly through the pop-up browser windows. You can also read the report file for each query sequence or download all the report in a compressed archive by click the corresponding links or icons.'),  table(Tr($thead), @final_result));
 	}
 
 	make_basic_page($result_table);
 }
+
+#######################################################################################
+# Subroutines : make_basic_page
+# Description : The basic page of P2G, alse called template page. It provides basic 
+#				layouts of the html component, you can insert your content into this
+#				page, and this page changed dynamicly.
+# Params      : $content, the content you want to insert.	
+# Return 	  : void
+# Created     : ????
+######################################################################################
 
 sub make_basic_page{	
 
@@ -162,8 +224,8 @@ sub make_basic_page{
 						'title' =>'Find peptides with your query patterns in the MimoDB database!'},'MimoScan')),
 					li(a({'href'=>'./MimoSearch.pl',
 						'title' =>'Find peptides identical to yours in the MimoDB database!'},'MimoSearch')),
-					li(a({'id'=>'current', 'href'=>'../cgi-bin/MimoBlast.pl',
-						'title' =>'Find peptides similar to yours in the MimoDB database!'},'MimoBlast')),
+					li(a({'id'=>'current', 'href'=>'../cgi-bin/p2g.pl',
+						'title' =>'Peptide to Genome'},'P2G')),
 					li(a({'href'=>'../citation.html'},'Citation')),
 					li(a({'href'=>'../help.html#MimoBlast'},'Help'))
 					),
@@ -196,24 +258,42 @@ sub make_error_page{
 	####----make_error_page end
 }
 
+####################################################################################
+# Subroutine  : check_user_input
+# Description : Check user's input, it won't run TBLASTN and make error page if
+#				the user's input exists any error.
+#				Errors to be checked: 1, There are no peptides in text area and
+#				also no uploaded file; 2, There are peptides in text area and also 
+#				uploaded file; 3, sequence format error
+# Params      : $SeqsData, sequence data in text area 
+#				$UserSideFile, uploaded sequence data file
+# Return 	  : unique(@$RawSeq), proccessed sequences; unique sequences, no fromat 
+#				error and without blank line
+# Created 	  : ????
+####################################################################################
+
 sub check_user_input{
 
-	my ($SeqsData,$UserSideFile) = @_;
+	my ($SeqsData , $UserSideFile) = @_;
 	my $RawSeq;
 
+	# Condition 1: there is no input at all, neither textarea nor upload file
 	if ( ($SeqsData eq '') and ($UserSideFile eq '') ){
 		make_error_page("<b>sequence input error!</b> No sequence is input, or no sequence file is uploaded. Please enter or paste peptides into the text area in FASTA or raw sequence format. Alternatively, upload a file in FASTA or raw sequence format.");
 	}
 
+	# Condition 2: overloaded inputs, there are peptides in text area and also upload file
 	if ( ($SeqsData ne '') and ($UserSideFile ne '') ){
 		make_error_page("<b>sequence input error!</b> Sequence overloaded! You can either enter a set of peptide sequences into the text area or upload a file in FASTA or raw sequence format. Do not submit sequences through the text area and the file box simultaneously.");
 	}
 
+	# Condtion 3: peptides only exits in text area
 	if ( ($SeqsData ne '') and ($UserSideFile eq '') ){
 		my @lines = split /^/, $SeqsData;
 		$RawSeq = checkFileFormat( (\@lines) );
 	}
 
+	# Condition 4: peptides only exits in upload file
 	if ( $UserSideFile ne '' and ($SeqsData eq '') ){
 		my $ServerSideFile = tmpFileName($UserSideFile);
 		open(fhSEQ,$ServerSideFile);
@@ -223,6 +303,15 @@ sub check_user_input{
 
 	return unique(@$RawSeq);
 }
+
+########################################################################################
+# Subroutine  : checkFileFormat
+# Description : Check the format of user's input
+# Params      : All lines of user's input, it won't run TBLASTN and make error page if
+#				there is any format error
+# Return 	  : $RawSeq, processed sequences without fasta annotation and blank line
+# Created	  : ????
+########################################################################################
 
 sub checkFileFormat{
 	my($lines) = @_;
@@ -242,7 +331,7 @@ sub checkFileFormat{
 			if ($RawSeqLine =~ /[^ACDEFGHIKLMNPQRSTVWY]/){
 				make_error_page("<b>unsupported file format or residue abbreviation!</b> Pay attention to <b>$line!</b>. At present, the MimoBlast tool only supports sequence in FASTA or raw format. Besides, only the standard IUPAC one-letter codes for the amino acids ( <i> i.e.</i> A, C, D, E, F, G, H, I, K, L, M, N, P, Q, R, S, T, V, W, Y) are supported.");} 
 
-			if (length($RawSeqLine) < 3 or length($RawSeqLine) > 40){
+			if (length($RawSeqLine) < 3 or length($RawSeqLine) > 150){
 				make_error_page("<b>unsupported sequence length!</b> Pay attention to <b>$line!</b>. The MimoBlast tool accepts peptide sequence at least with 3 residues and no longer than 40 residues, as all peptides in the MimoDB database is 3-40 residues long.");}
 
 			push @$RawSeq, $RawSeqLine;
@@ -252,179 +341,174 @@ sub checkFileFormat{
 }
 
 
+####################################################################################
+# Subroutine  : run_blastn
+# Description : Using system command to run TBLASTN.
+# Params      : $query_seq, query sequence from the textarea or user upload file
+#				$run_time, 
+# Return 	  : 
+# Created 	  : ????
+####################################################################################
+
 sub run_tblastn{
-	####----get the mimotope array from make_result_page subrutine
-	
-		my ($query_seq, $run_time) = @_;
+	####----get the mimotope array from make_result_page subroutine
+	my ($query_seq, $run_time) = @_;
 	
 	####----parameters for advanced search
-
-		my $e_value = param('evalue');
-		my $max_result = param('max_length');
-		my $short_tblastn = param('short_default');
+	my $e_value = param('evalue');
+	my $max_result = param('max_length');
+	my $short_tblastn = param('short_default');
 	
-	####----tblastn direction
-	
-		my $blast_dir = "/home/sunshine/ncbi-blast-2.2.30+/bin";
-		my $tblastn_dir = "$blast_dir/tblastn";
+	####----tblastn directory
+	my $blast_dir = "/home/sunshine/ncbi-blast-2.2.30+/bin";
+	my $tblastn_dir = "$blast_dir/tblastn";
 	
 	####----outfile name
-		
-		my $out_file_name = "$tmp_dir/MimoBlastResult".$run_time.".all";
+	my $out_file_name = "$tmp_dir/P2GResult_".$run_time.".all";
 	
 	####----the database name
-		
-		my $db_name = "/home/sunshine/Downloads/chroms/blast_db_hg38/hg_merge_blast_db_1";
+	my $db_name = "/home/sunshine/Downloads/chroms/blast_db_hg38/hg_merge_blast_db_5";
 
 	####----create tblastn function
-
-		my $tblastn = "$tblastn_dir -query $query_seq -db $db_name -out $out_file_name";
+	my $tblastn = "$tblastn_dir -query $query_seq -db $db_name -out $out_file_name";
 
 	####----check the advanced search parameter value
-		
-		if ($short_tblastn) {
-			$tblastn .= ' -task tblastn-short -word_size 2 -seg no -evalue 20000 -matrix PAM30 -gapopen 9 -gapextend 1'; 
-		}
-		else{
-			#$tblastn .= ' -task tblastn -word_size 3 -seg yes -matrix BLOSUM62 -gapopen 11 -gapextend 1';
-			if ($e_value) {
-				$tblastn .= ' -evalue '.$e_value;
-			}
-			else {
-				$tblastn .= ' -evalue 0.001';
-			}
-		}
-		if ($max_result) {
-			$tblastn .= ' -max_target_seqs '.$max_result;
+	if ($short_tblastn) {
+		$tblastn .= ' -task tblastn-short -word_size 2 -seg no -evalue 20000 -matrix PAM30 -gapopen 9 -gapextend 1'; 
+	} else{
+		#$tblastn .= ' -task tblastn -word_size 3 -seg yes -matrix BLOSUM62 -gapopen 11 -gapextend 1';
+		if ($e_value) {
+			$tblastn .= ' -evalue '.$e_value;
 		}
 		else {
-			$tblastn .= ' -max_target_seqs 300';
-		}
-		
+			$tblastn .= ' -evalue 0.001';
+		}	
+	}
+	if ($max_result) {
+		$tblastn .= ' -max_target_seqs '.$max_result;
+	} else {
+		$tblastn .= ' -max_target_seqs 10';
+	}
 	
 	####----run tblastn
-
-		my $system_check = system($tblastn);
+	my $system_check = system($tblastn);
 
 	####----check if the output file exists
-
-		if (-e $out_file_name) {
-			my $downfile = $out_file_name.".gz";
-			`gzip -c9 $out_file_name > $downfile`;
-			return ($out_file_name);
-		}
-		else {
-			make_error_page('<b>blast error!</b> Blast report file does not exist. Please tell us the problem through the <a href="http://i.uestc.edu.cn/mimodb/feedback.php" >Feedback</a> link on the left menu bar. We will solve it as soon as possible. Thank you very much!');
-		}
+	if (-e $out_file_name) {
+		my $downfile = $out_file_name.".gz";			
+		`gzip -c9 $out_file_name > $downfile`;
+		return ($out_file_name);
+	}
+	else {
+		make_error_page('<b>blast error!</b> Blast report file does not exist. Please tell us the problem through the <a href="http://i.uestc.edu.cn/mimodb/feedback.php" >Feedback</a> link on the left menu bar. We will solve it as soon as possible. Thank you very much!');
+	}
 
 	####----run_tblastn end
 }
 
-sub parse_result{
-	####----blast output file name and query sequences and timestamp as input
-	my ($file_name,$mimotopes,$run_time) = @_;
+######################################################################################
+# Subroutine   : parse_result														 #
+# Despcription : parse result from tblastn											 #
+# Params       : tblastn results file, 												 #
+# Return       : array, contains the hits information (the first array element is    #
+# 		   		 the result count, and the rest array element are hash maps that     #
+#          		 each hash map contains the hit's name, start poistion, end postion) #
+# Created      : 2015-3-31 by Qiang He 												 #
+######################################################################################
+
+sub parse_result() {
+	my ($file_name, $mimotopes, $run_time) = @_;
+	open RES, $file_name or die(make_error_page($!));
 	
-	####----@final_result for saving all query sequences; @mimo_result for saving each query sequence
-	my (@final_result,@mimo_result);
-	
-	####----open the output file 
-	open RESULT,$file_name or die(make_error_page($!));
+	# hash table key
+	my $hit_name = "name";
+	my $hit_start = "start";
+	my $hit_end = "end";
+	my $hit_frame = "frame";
+	my $hit_query = "query";
 
-	####----$count for each result file name 
-	####----$open_result is a switch for opennig one file to print result into it 
-	####----$print_on is a switch for print or not
-	####----$turn is a switch for beginning a new @mimo_result
-	my $count = 1;
-	my $open_result = 0;
-	my $print_on = 0; 
-	my $turn = 0;
+	# used to record the pointer of the file, and then we can back to the specify position
+	my $file_position_prev = 0; 
+	my $file_position_cur = 0;
 
-	####----parse the output file
-	while (defined(my $line = <RESULT>)) {
+	# array contains the result hits
+	my $result_count = 0;
+	my @results = ();
 
-		####----each query sequence begin with a 'Query='
-		if ($line =~ /^Query=/) {
-			$print_on = 1;
-			$open_result = 1;
-		}
-		my $result_name = "Report ".$count;
-		my $local_result_name = "MimoBlastResult".$run_time.'.part'.$count;
-			open ONE,">$tmp_dir/$local_result_name" or die(make_error_page($!)) if $open_result;
-			if ($open_result == 1) {
-				print ONE $BlastHead; #print the report head
-				$open_result = 0;
-			}
-			if ($print_on == 1) {
-				print ONE $line;
-			}
+	my $line;
+	while($line = <RES>) {
+		chomp $line;
 
-			####----each query sequence end with 'Effective search space used:'
-			if ($line =~ /^Effective search space used:/) {
-				$print_on = 0;
-				$turn = 1;
-				close ONE;
-				$count++;
-			}
+		# hash holding the reulst, 
+		# hit[0]: hit's name, hit[1]: hit's start position
+		# hit[2]: hit's end poistion
+		my %hit = (); 
+		if ($line =~ />/) {
+			$result_count++;
 
-			####----get the MimoID
-			if ( $line =~ /^> (Mimoset ID: \d+; Peptide \d+-?\d?: \w+)/ ) {
-				$line = $1;
-				my $similar;
-				if ($mimo_result[-1]) {
-					my $num = 0;
-					while ($num <= $#mimo_result) {
-						if ($line eq $mimo_result[$num]) {
-							$similar = 0;
-							last;
+			# query name
+			# >chr10_GL383545v1_alt
+			my ($name) = $line =~ />(.+)/;
+			$hit{$hit_name} = trim($name); 
+			
+			while(my $res = <RES>) {
+				chomp $res;
+				if($res =~ />/) {
+					# if the hit's begining found, set the file pointer back one line
+					$file_position_cur = tell(RES);
+					seek(RES, $file_position_prev, 0);
+					last;
+				} 	# end if
+
+				# query sequence
+				# Query  1    DENRSDLQRQNHTFSLEFNKDTEIQYSSIAFP  32
+				if($res =~ /^Query\s+\d+/) {
+					my ($query) = $res =~ /^Query\s+\d+\s+(\w+)\s+\d+/;
+					foreach my $user_query (@$mimotopes) {
+						if($query =~ /$user_query/i) {
+							$hit{$hit_query} = $user_query;
 						}
-						else {
-							$similar = 1;
-						}
-						$num++;
 					}
-					if ($similar == 1) {
-						push (@mimo_result,$line);
-					}
+				} 
+
+				# query frame
+				# Frame = +1
+				if($res =~ /\s+Frame/) {
+					my ($frame) =  $res =~ /\s+Frame\s+=\s+([+-]\d)/;
+					$hit{$hit_frame} = $frame;
 				}
-				else {push @mimo_result,$line;}
-			}
 
-			####----get the information from @mimo_result and value it as ''
-			if ($print_on == 0 and $open_result == 0 and $turn == 1 ) {
-				my $result_file = a({'-href'=>"./MimoBlast.pl?File=$local_result_name",'Title'=>'View it','target'=>'_blank'},$result_name."&nbsp;&nbsp;". img({'src'=>'../image/viewer.gif', 'align'=>'absmiddle'}));
+				# query location
+				# Sbjct  34   DENRSDLQRQNHTFSLEFNKDTEIQYSSIAFP  129
+				if($res =~ /^Sbjct/) {
+					my ($start, $end) = $res =~ /^Sbjct\s+(\d+)\s+\w+\s+(\d+)$/;
+					$hit{$hit_start} = $start;
+					$hit{$hit_end} = $end;
+					push @results, {%hit}; # push this hit into results
+				}  # end if
 
-				####----if no subject is found ,the MimoID will be 'No hits found'
-				if (!$mimo_result[-1]) {
-					push @mimo_result,td("No hits found!");
-					my $return_result = Tr(td(shift(@$mimotopes)),$mimo_result[-1],td($result_file));
-					push @final_result,$return_result;
-				}
-				else {
-					my $j = 0;
-					while ($j <= $#mimo_result) {
-						if ($mimo_result[$j] =~ /Mimoset ID: (\d+); Peptide \d+-?\d?: (\w+)/ ) {
-							$mimo_result[$j] = td(a({-href=>"javascript:void(0)",onmouseover=>"openwin(\"$local_result_name\",\"$1\",\"$2\")"},$2)." in mimoset: ". a({'href'=>"http://i.uestc.edu.cn/mimodb/browse.php?table=mimoset&ID=$1",'Title'=>'Visit it','target'=>'_blank'},$1));
-						}
-						$j++;
-					}
-					my $rowspan = scalar(@mimo_result);
-					my $return_result = Tr(td({'rowspan'=>"$rowspan"},shift(@$mimotopes)),shift(@mimo_result),td({'rowspan'=>"$rowspan"},$result_file),Tr([@mimo_result]));
-					push @final_result,$return_result;
-				}	
-				@mimo_result = qw//;
-				$turn = 0;
-			}
-		}
+				# record the previous file pointer, so we can set the file pointer back one line
+				# if the hit's begining found
+				$file_position_prev = tell(RES);
+			}   # end while
+		}  # end if
+	}  # end while
+	close RES;
 
-	####----close the output filehandle and return the @final_result
+	# put the result count into the array
+	unshift @results, $result_count;
 
-		close RESULT;
-		return \@final_result;
+	return \@results;
+}  # end subroutine parse_result
 
-	####----parse_result end
-}
+##############################################################################
+# Subroutine  : unique
+# Description : Delete redundant sequence
+# Params      : @RawSeq, sequences proccessed by subroutine checkFileFormat
+# Return      : $filtered, unique sequences
+# Created 	  : 2011-8-15 by Jian Huang
+##############################################################################
 
-#Delete redundant sequence added by Jian Huang 2011-8-15
 sub unique {
     my @RawSeq = @_;
 	my $filtered;
@@ -437,16 +521,33 @@ sub unique {
 	return $filtered;
 }
 
+#############################################################################
+# Subtoutine  : save_mimotopes
+# Description : Saving sequences into server's tmp dir, so that we can use 
+#				it to run TBLASTN.
+# Params      : @seqs, sequences processed by checkFileFormat and unique
+# Return 	  : $tmp_mimotopes, file contains query sequence; 
+#				$run_time, running time of this TBLASTN job
+# Created     : ????
+# Modified 	  : 2015-3-31 by Qiang He
+#				Change the run time to be understandable.
+#############################################################################
+
 sub save_mimotopes{
 	####----parameter: @sequences pass the checking
 	my (@seqs) = @_;
 	
 	####----make tempfile unique
+	# use the localtime add a random number less than 1000 to generate run time
 	srand(time);
-	my $run_time =time.int rand(1000);
-			
+	my $rand_number = int rand(1000);
+	my ($sec,$min,$hour,$day,$mon,$year,$wday,$yday,$isdst)=localtime(time());
+	my $year_real = $year + 1900;
+	my $month_real = $mon + 1;
+	my $run_time = "$year_real\_$month_real\_$day\_$hour\_$min\_$sec\_$rand_number";
+
 	####----the local direction for saving the mimotope file 
-	my $tmp_mimotopes = "$tmp_dir/MimoBlast_InFile".$run_time.".fa";
+	my $tmp_mimotopes = "$tmp_dir/P2G_In_".$run_time.".fa";
 	open FILE,">$tmp_mimotopes" or make_error_page($!." hello");
 
 	foreach my $seq (@seqs) {
